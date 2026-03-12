@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - name: Setup Zig (User Version)
+        uses: mlugg/setup-zig@v2.1.0
+        with:
+          version: 0.15.2 # As requested. If this fails, user will know it's their version choice.
+
+      - name: Build library (Debug)
+        run: zig build -Doptimize=Debug
+
+      - name: Build library (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run Zig tests
+        run: zig build test --summary all
+      
+      - name: Run benchmarks
+        run: zig build bench
+
+  examples-run:
+    name: Run Examples Matrix
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+          # - os: macos-latest
+          #   target: x86_64-macos
+          # - os: windows-latest
+          #   target: x86_64-windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2.1.0
+        with:
+          version: 0.15.2
+
+      - name: Run all examples
+        run: zig build run-all-examples

@@ -1,0 +1,69 @@
+name: Bug Report
+description: Create a report to help us improve httpx.zig
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+
+        Please check the [documentation](https://muhammad-fiaz.github.io/httpx.zig/) to ensure the issue is not intended behavior.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: "I tried to request X but got Y error..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Initialize client...
+        2. Make request to...
+        3. See error...
+    validations:
+      required: true
+
+  - type: input
+    id: zig-version
+    attributes:
+      label: Zig Version
+      description: What version of Zig are you using? (zig version)
+      placeholder: 0.15.2
+    validations:
+      required: true
+
+  - type: input
+    id: httpx-version
+    attributes:
+      label: httpx.zig Version
+      description: What version of httpx.zig are you using? (e.g. 0.0.1, main branch commit)
+      placeholder: 0.0.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Screenshots
+      description: Paste any relevant logs or attach screenshots.
+      render: shell

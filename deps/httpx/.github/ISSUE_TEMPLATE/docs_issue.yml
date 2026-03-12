@@ -1,0 +1,35 @@
+name: Documentation Issue
+description: Report errors or missing information in the documentation
+title: "[Docs]: "
+labels: ["documentation", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve our documentation!
+
+        Docs are available at: https://muhammad-fiaz.github.io/httpx.zig/
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The Problem
+      description: What is wrong or missing in the documentation?
+      placeholder: "The example for X is outdated..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested Fix
+      description: How should we fix it?
+    validations:
+      required: false
+
+  - type: input
+    id: page-url
+    attributes:
+      label: Page URL
+      description: Link to the page with the issue.
+      placeholder: https://muhammad-fiaz.github.io/httpx.zig/guide/...
