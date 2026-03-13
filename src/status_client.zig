@@ -1,10 +1,12 @@
 const std = @import("std");
 const httpx = @import("../deps/httpx/src/httpx.zig");
+const zeit = @import("../deps/zeit/src/zeit.zig");
 
 pub const Errors = error{
     ConnectionFailed,
     InvalidResponse,
     UnexpectedStatusCode,
+    InvalidDateTimeFormat,
 };
 
 pub const DelayStatus = enum {
@@ -13,22 +15,32 @@ pub const DelayStatus = enum {
     Canceled,
     Unknown,
 
-    pub fn fromResponse(delay_minutes: ?u64, departed_status: DepartedStatus) DelayStatus {
+    pub fn fromResponse(delay: ?zeit.Duration, departed_status: DepartedStatus) DelayStatus {
         if (departed_status == .Canceled) {
             return .Canceled;
         }
 
-        if (delay_minutes) |minutes| {
-            return if (minutes > 0) .Delayed else .OnTime;
+        if (delay) |d| {
+            const has_delay = d.days > 0 or d.hours > 0 or d.minutes > 0 or d.seconds > 0 or d.milliseconds > 0 or d.microseconds > 0 or d.nanoseconds > 0;
+            return if (has_delay) .Delayed else .OnTime;
         }
 
-        return .Unknown;
+        return .OnTime;
+    }
+
+    pub fn toString(self: DelayStatus) []const u8 {
+        return switch (self) {
+            .OnTime => "On Time",
+            .Delayed => "Delayed",
+            .Canceled => "Canceled",
+            .Unknown => "Unknown",
+        };
     }
 };
 
 pub const DelayInfo = struct {
-    departure_delay_minutes: ?u64,
-    arrival_delay_minutes: ?u64,
+    departure_delay_minutes: ?zeit.Duration,
+    arrival_delay_minutes: ?zeit.Duration,
 };
 
 pub const DepartedStatus = enum {
@@ -50,6 +62,16 @@ pub const DepartedStatus = enum {
         } else {
             return DepartedStatus.Unknown;
         }
+    }
+
+    pub fn toString(self: DepartedStatus) []const u8 {
+        return switch (self) {
+            .Scheduled => "Scheduled",
+            .Departed => "Departed",
+            .Arrived => "Arrived",
+            .Canceled => "Canceled",
+            .Unknown => "Unknown",
+        };
     }
 };
 
@@ -79,6 +101,14 @@ pub const GateInfo = struct {
     baggage_claim: ?[]const u8,
 };
 
+pub const TimeInfo = struct {
+    scheduled_local: ?zeit.Instant,
+    scheduled_utc: ?zeit.Instant,
+
+    actual_local: ?zeit.Instant,
+    actual_utc: ?zeit.Instant,
+};
+
 pub const FlightStatus = struct {
     flight_iata: []const u8,
     airline_name: []const u8,
@@ -91,6 +121,11 @@ pub const FlightStatus = struct {
     arrival_airport: Airport,
     arrival_gate: GateInfo,
     in_flight_params: InFlightParams,
+    departure_time: TimeInfo,
+    arrival_time: TimeInfo,
+    percentage_completed: ?i64,
+    total_duration: ?zeit.Duration,
+    remaining_duration: ?zeit.Duration,
 
     pub fn deinit(self: *FlightStatus, allocator: std.mem.Allocator) void {
         allocator.free(self.flight_iata);
@@ -233,14 +268,18 @@ const ApiFlight = struct {
     dir: ?f64 = null,
 
     dep_time: ?[]const u8 = null, // Scheduled departure time, airport local time
-    dep_time_ts: ?u64 = null, // Scheduled departure time, UNIX timestamp
+    dep_time_ts: ?i64 = null, // Scheduled departure time, UNIX timestamp
     dep_actual: ?[]const u8 = null, // Actual departure time, airport local time
-    dep_actual_ts: ?u64 = null, // Actual departure time, UNIX timestamp
+    dep_actual_ts: ?i64 = null, // Actual departure time, UNIX timestamp
 
     arr_time: ?[]const u8 = null, // Scheduled arrival time, airport local time
-    arr_time_ts: ?u64 = null, // Scheduled arrival time, UNIX timestamp
+    arr_time_ts: ?i64 = null, // Scheduled arrival time, UNIX timestamp
     arr_actual: ?[]const u8 = null, // Actual arrival time, airport local time
-    arr_actual_ts: ?u64 = null, // Actual arrival time, UNIX timestamp
+    arr_actual_ts: ?i64 = null, // Actual arrival time, UNIX timestamp
+
+    percent: ?i64 = null, // Percentage of flight completed
+    duration: ?usize = null, // Total flight duration in minutes
+    eta: ?usize = null, // Remaining flight duration in minutes
 };
 
 fn parseFlightStatus(allocator: std.mem.Allocator, body: []const u8, fallback_flight_number: []const u8) !FlightStatus {
@@ -255,7 +294,8 @@ fn parseFlightStatus(allocator: std.mem.Allocator, body: []const u8, fallback_fl
 
 fn toFlightStatus(allocator: std.mem.Allocator, api_flight: ApiFlight, fallback_flight_number: []const u8) !FlightStatus {
     const departed_status = DepartedStatus.fromResponse(api_flight.status orelse "");
-    const arrival_delay_minutes = minutesToU64(api_flight.arr_delayed);
+    const departure_delay_duration = minutesToDuration(api_flight.dep_delayed);
+    const arrival_delay_duration = minutesToDuration(api_flight.arr_delayed);
 
     const flight_iata = try dupeOrDefault(allocator, api_flight.flight_iata, fallback_flight_number);
     errdefer allocator.free(flight_iata);
@@ -308,14 +348,17 @@ fn toFlightStatus(allocator: std.mem.Allocator, api_flight: ApiFlight, fallback_
     const arr_baggage = try dupeOptional(allocator, api_flight.arr_baggage);
     errdefer if (arr_baggage) |baggage| allocator.free(baggage);
 
+    const total_duration = if (api_flight.duration) |d| zeit.Duration{ .minutes = d } else null;
+    const remaining_duration = if (api_flight.eta) |d| zeit.Duration{ .minutes = d } else null;
+
     return FlightStatus{
         .flight_iata = flight_iata,
         .airline_name = airline_name,
         .flight_number = flight_number,
-        .delay_status = DelayStatus.fromResponse(arrival_delay_minutes, departed_status),
+        .delay_status = DelayStatus.fromResponse(arrival_delay_duration, departed_status),
         .delay_info = .{
-            .departure_delay_minutes = minutesToU64(api_flight.dep_delayed),
-            .arrival_delay_minutes = arrival_delay_minutes,
+            .departure_delay_minutes = departure_delay_duration,
+            .arrival_delay_minutes = arrival_delay_duration,
         },
         .departed_status = departed_status,
         .departure_airport = .{
@@ -347,21 +390,36 @@ fn toFlightStatus(allocator: std.mem.Allocator, api_flight: ApiFlight, fallback_
             .longitude = api_flight.lng,
             .heading = api_flight.dir,
         },
+        .departure_time = .{
+            .scheduled_local = if (api_flight.dep_time) |dep_time_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_time_str } }) else null,
+            .scheduled_utc = if (api_flight.dep_time_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .actual_local = if (api_flight.dep_actual) |dep_actual_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_actual_str } }) else null,
+            .actual_utc = if (api_flight.dep_actual_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+        },
+        .arrival_time = .{
+            .scheduled_local = if (api_flight.arr_time) |arr_time_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_time_str } }) else null,
+            .scheduled_utc = if (api_flight.arr_time_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .actual_local = if (api_flight.arr_actual) |arr_actual_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_actual_str } }) else null,
+            .actual_utc = if (api_flight.arr_actual_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+        },
+        .percentage_completed = api_flight.percent,
+        .total_duration = total_duration,
+        .remaining_duration = remaining_duration,
     };
 }
 
-fn minutesToU64(value: ?f64) ?u64 {
+fn minutesToDuration(value: ?f64) ?zeit.Duration {
     const raw = value orelse return null;
     if (raw < 0) {
         return null;
     }
 
     const rounded = std.math.round(raw);
-    if (rounded > @as(f64, @floatFromInt(std.math.maxInt(u64)))) {
+    if (rounded > @as(f64, @floatFromInt(std.math.maxInt(usize)))) {
         return null;
     }
 
-    return @as(u64, @intFromFloat(rounded));
+    return .{ .minutes = @as(usize, @intFromFloat(rounded)) };
 }
 
 fn metersToFeet(value: ?f64) ?f64 {

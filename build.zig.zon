@@ -44,6 +44,9 @@
         .httpx = .{
             .path = "deps/httpx",
         },
+        .zeit = .{
+            .path = "deps/zeit",
+        },
     },
     .paths = .{
         "build.zig",

@@ -54,6 +54,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const zeit_dep = b.dependency("zeit", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const args_module = b.createModule(.{
         .root_source_file = args_dep.path("src/args.zig"),
@@ -72,6 +76,11 @@ pub fn build(b: *std.Build) void {
     });
     const httpx_module = b.createModule(.{
         .root_source_file = httpx_dep.path("src/httpx.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const zeit_module = b.createModule(.{
+        .root_source_file = zeit_dep.path("src/zeit.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -94,6 +103,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigzag", .module = zigzag_module },
             .{ .name = "dotenv", .module = dotenv_module },
             .{ .name = "httpx", .module = httpx_module },
+            .{ .name = "zeit", .module = zeit_module },
         },
     });
 
