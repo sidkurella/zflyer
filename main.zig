@@ -2,6 +2,7 @@ const std = @import("std");
 const zz = @import("deps/zigzag/src/root.zig");
 const args = @import("deps/args/src/args.zig");
 const status_client = @import("src/status_client.zig");
+const location_client = @import("src/location_client.zig");
 const Env = @import("deps/dotenv-zig/src/root.zig");
 const zeit = @import("deps/zeit/src/zeit.zig");
 
@@ -43,6 +44,9 @@ pub fn main() !void {
 
     var sc = status_client.FlightStatusClient.init(allocator, try env.getRequired("AIRLABS_API_KEY"));
     defer sc.deinit();
+
+    var lc = location_client.LocationClient.init(allocator, try env.getRequired("GEOAPIFY_API_KEY"));
+    defer lc.deinit();
 
     const flight_number = result.getString("flight_number");
     if (flight_number == null) {
@@ -171,6 +175,14 @@ pub fn main() !void {
         if (status.in_flight_params.latitude) |lat| {
             if (status.in_flight_params.longitude) |lng| {
                 try stdout.interface.print("- Position: {d}, {d}\n", .{ lat, lng });
+
+                var location_result = try lc.checkLocation(lat, lng);
+                if (location_result != null) {
+                    defer location_result.?.deinit();
+                    try stdout.interface.print("Overflying: {s}\n", .{location_result.?.formatted_address});
+                } else {
+                    try stdout.interface.writeAll("Overflying an unknown location\n");
+                }
             }
         }
     }
@@ -216,6 +228,8 @@ fn roundToI64(value: f64) i64 {
 }
 
 fn durationMinutes(duration: zeit.Duration) usize {
+    // TODO: Maybe this should use nanoseconds internally to avoid precision issues?
+    // For now this should be good enough since the API only returns minute-level precision for delays
     return duration.days * 24 * 60 + duration.hours * 60 + duration.minutes + @divFloor(duration.seconds, 60);
 }
 

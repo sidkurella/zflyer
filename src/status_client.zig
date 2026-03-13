@@ -1,6 +1,7 @@
 const std = @import("std");
 const httpx = @import("../deps/httpx/src/httpx.zig");
 const zeit = @import("../deps/zeit/src/zeit.zig");
+const hutils = @import("http_utils.zig");
 
 pub const Errors = error{
     ConnectionFailed,
@@ -175,7 +176,7 @@ pub const FlightStatusClient = struct {
         try query_params.put("api_key", self.api_key);
         try query_params.put("flight_iata", flight_number);
 
-        const url = try queryParamsToURL(self.allocator, "/flight", query_params);
+        const url = try hutils.queryParamsToURL(self.allocator, "/flight", query_params);
         defer self.allocator.free(url);
 
         var resp = self.http_client.get(url, .{}) catch |err| switch (err) {
@@ -207,30 +208,6 @@ pub const FlightStatusClient = struct {
         self.http_client.deinit();
     }
 };
-
-fn queryParamsToURL(
-    allocator: std.mem.Allocator,
-    base: []const u8,
-    params: std.StringHashMap([]const u8),
-) ![]const u8 {
-    var url = try std.ArrayList(u8).initCapacity(allocator, base.len);
-    errdefer url.deinit(allocator);
-
-    try url.appendSlice(allocator, base);
-    if (params.count() > 0) {
-        try url.append(allocator, '?');
-        var first = true;
-        var it = params.iterator();
-        while (it.next()) |entry| {
-            if (!first) {
-                try url.append(allocator, '&');
-            }
-            first = false;
-            try url.print(allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
-        }
-    }
-    return url.toOwnedSlice(allocator);
-}
 
 const ApiFlightResponse = struct {
     response: ?ApiFlight = null,
