@@ -64,7 +64,7 @@ pub fn main() !void {
     var stdout = std.fs.File.stdout().writer(&stdout_buffer);
     defer stdout.interface.flush() catch {};
 
-    try stdout.interface.writeAll("\n=== Flight Status ===\n");
+    try stdout.interface.writeAll("=== Flight Status ===\n");
     try stdout.interface.print("Flight: {s} {s} ({s})\n", .{ status.airline_name, status.flight_number, status.flight_iata });
     try stdout.interface.print("Route:  {s} -> {s}\n", .{ status.departure_airport.iata_code, status.arrival_airport.iata_code });
     try stdout.interface.print("State:  {s} | {s}\n", .{ status.departed_status.toString(), status.delay_status.toString() });
@@ -137,7 +137,7 @@ pub fn main() !void {
     }
 
     try stdout.interface.writeAll("\nTiming\n");
-    try stdout.interface.writeAll("- Departure (airport time):    ");
+    try stdout.interface.writeAll("- Departure (airport time):       ");
     if (status.departure_time.actual_local) |departure_actual_local| {
         try printInstant(&stdout.interface, departure_actual_local);
     } else {
@@ -145,15 +145,43 @@ pub fn main() !void {
     }
     try stdout.interface.writeAll("\n");
 
-    try stdout.interface.writeAll("- Arrival (airport time):      ");
+    try stdout.interface.writeAll("- Arrival (airport time):         ");
     if (status.arrival_time.actual_local) |arrival_actual_local| {
         try printInstant(&stdout.interface, arrival_actual_local);
     } else {
         try printOptionalInstant(&stdout.interface, status.arrival_time.scheduled_local);
     }
+    try stdout.interface.writeAll("\n\n");
+
+    // Convert the UTC times to the local timezone of the computer
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+    const local_zone = try zeit.local(allocator, &env_map);
+    defer local_zone.deinit();
+
+    try stdout.interface.writeAll("- Departure (your local time):    ");
+    if (status.departure_time.actual_utc) |departure_actual_utc| {
+        const departure_local = departure_actual_utc.in(&local_zone);
+        try printInstant(&stdout.interface, departure_local);
+    } else if (status.departure_time.scheduled_utc) |departure_scheduled_utc| {
+        const departure_local = departure_scheduled_utc.in(&local_zone);
+        try printInstant(&stdout.interface, departure_local);
+    } else {
+        try stdout.interface.writeAll("Unknown");
+    }
     try stdout.interface.writeAll("\n");
 
-    // TODO: Convert the UTC times to the local timezone of the computer
+    try stdout.interface.writeAll("- Arrival (your local time):      ");
+    if (status.arrival_time.actual_utc) |arrival_actual_utc| {
+        const arrival_local = arrival_actual_utc.in(&local_zone);
+        try printInstant(&stdout.interface, arrival_local);
+    } else if (status.arrival_time.scheduled_utc) |arrival_scheduled_utc| {
+        const arrival_local = arrival_scheduled_utc.in(&local_zone);
+        try printInstant(&stdout.interface, arrival_local);
+    } else {
+        try stdout.interface.writeAll("Unknown");
+    }
+    try stdout.interface.writeAll("\n");
 
     const has_live_data =
         status.in_flight_params.altitude != null or
