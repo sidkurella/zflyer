@@ -45,7 +45,21 @@ pub fn main() !void {
     }
 
     std.debug.print("Checking status for flight: {s}\n", .{flight_number.?});
-    sc.checkStatus(flight_number.?) catch |err| {
+    var status = sc.checkStatus(flight_number.?) catch |err| {
         std.debug.print("Error checking flight status: {s}\n", .{@errorName(err)});
+        return;
     };
+    defer status.deinit(allocator);
+
+    std.debug.print(
+        "{s} {s}: {s} -> {s}, status: {s}, delay: {any}\n",
+        .{
+            status.airline_name,
+            status.flight_number,
+            status.departure_airport.iata_code,
+            status.arrival_airport.iata_code,
+            @tagName(status.departed_status),
+            status.delay_info.arrival_delay_minutes,
+        },
+    );
 }
