@@ -115,6 +115,7 @@ pub const TimeInfo = struct {
 
 pub const FlightStatus = struct {
     flight_iata: []const u8,
+    airline_iata: []const u8,
     airline_name: []const u8,
     flight_number: []const u8,
     delay_status: DelayStatus,
@@ -127,12 +128,14 @@ pub const FlightStatus = struct {
     in_flight_params: InFlightParams,
     departure_time: TimeInfo,
     arrival_time: TimeInfo,
+    updated_at_utc: ?zeit.Instant,
     percentage_completed: ?i64,
     total_duration: ?zeit.Duration,
     remaining_duration: ?zeit.Duration,
 
     pub fn deinit(self: *FlightStatus, allocator: std.mem.Allocator) void {
         allocator.free(self.flight_iata);
+        allocator.free(self.airline_iata);
         allocator.free(self.airline_name);
         allocator.free(self.flight_number);
 
@@ -218,6 +221,7 @@ const ApiFlightResponse = struct {
 
 const ApiFlight = struct {
     flight_iata: ?[]const u8 = null,
+    airline_iata: ?[]const u8 = null,
     airline_name: ?[]const u8 = null,
     flight_number: ?[]const u8 = null,
     status: ?[]const u8 = null,
@@ -248,18 +252,26 @@ const ApiFlight = struct {
     dir: ?f64 = null,
 
     dep_time: ?[]const u8 = null, // Scheduled departure time, airport local time
+    dep_time_utc: ?[]const u8 = null, // Scheduled departure time, UTC
     dep_time_ts: ?i64 = null, // Scheduled departure time, UNIX timestamp
     dep_estimated: ?[]const u8 = null, // Updated departure time, airport local time
+    dep_estimated_utc: ?[]const u8 = null, // Updated departure time, UTC
     dep_estimated_ts: ?i64 = null, // Updated departure UNIX timestamp
     dep_actual: ?[]const u8 = null, // Actual departure time, airport local time
+    dep_actual_utc: ?[]const u8 = null, // Actual departure time, UTC
     dep_actual_ts: ?i64 = null, // Actual departure time, UNIX timestamp
 
     arr_time: ?[]const u8 = null, // Scheduled arrival time, airport local time
+    arr_time_utc: ?[]const u8 = null, // Scheduled arrival time, UTC
     arr_time_ts: ?i64 = null, // Scheduled arrival time, UNIX timestamp
     arr_estimated: ?[]const u8 = null, // Updated arrival time, airport local time
+    arr_estimated_utc: ?[]const u8 = null, // Updated arrival time, UTC
     arr_estimated_ts: ?i64 = null, // Updated arrival UNIX timestamp
     arr_actual: ?[]const u8 = null, // Actual arrival time, airport local time
+    arr_actual_utc: ?[]const u8 = null, // Actual arrival time, UTC
     arr_actual_ts: ?i64 = null, // Actual arrival time, UNIX timestamp
+
+    updated: ?i64 = null, // Last update time, UNIX timestamp
 
     percent: ?i64 = null, // Percentage of flight completed
     duration: ?usize = null, // Total flight duration in minutes
@@ -283,6 +295,9 @@ fn toFlightStatus(allocator: std.mem.Allocator, api_flight: ApiFlight, fallback_
 
     const flight_iata = try dupeOrDefault(allocator, api_flight.flight_iata, fallback_flight_number);
     errdefer allocator.free(flight_iata);
+
+    const airline_iata = try dupeOrDefault(allocator, api_flight.airline_iata, inferAirlineIata(flight_iata));
+    errdefer allocator.free(airline_iata);
 
     const airline_name = try dupeOrDefault(allocator, api_flight.airline_name, "Unknown");
     errdefer allocator.free(airline_name);
@@ -335,8 +350,18 @@ fn toFlightStatus(allocator: std.mem.Allocator, api_flight: ApiFlight, fallback_
     const total_duration = if (api_flight.duration) |d| zeit.Duration{ .minutes = d } else null;
     const remaining_duration = if (api_flight.eta) |d| zeit.Duration{ .minutes = d } else null;
 
+    const estimated_arrival_for_progress = try selectArrivalForProgress(api_flight);
+
+    const normalized_progress = normalizeProgressData(
+        api_flight.percent,
+        total_duration,
+        remaining_duration,
+        estimated_arrival_for_progress,
+    );
+
     return FlightStatus{
         .flight_iata = flight_iata,
+        .airline_iata = airline_iata,
         .airline_name = airline_name,
         .flight_number = flight_number,
         .delay_status = DelayStatus.fromResponse(arrival_delay_duration, departed_status),
@@ -376,24 +401,158 @@ fn toFlightStatus(allocator: std.mem.Allocator, api_flight: ApiFlight, fallback_
         },
         .departure_time = .{
             .scheduled_local = if (api_flight.dep_time) |dep_time_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_time_str } }) else null,
-            .scheduled_utc = if (api_flight.dep_time_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .scheduled_utc = try parseUtcInstant(api_flight.dep_time_ts, api_flight.dep_time_utc),
             .estimated_local = if (api_flight.dep_estimated) |dep_estimated_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_estimated_str } }) else null,
-            .estimated_utc = if (api_flight.dep_estimated_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .estimated_utc = try parseUtcInstant(api_flight.dep_estimated_ts, api_flight.dep_estimated_utc),
             .actual_local = if (api_flight.dep_actual) |dep_actual_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_actual_str } }) else null,
-            .actual_utc = if (api_flight.dep_actual_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .actual_utc = try parseUtcInstant(api_flight.dep_actual_ts, api_flight.dep_actual_utc),
         },
         .arrival_time = .{
             .scheduled_local = if (api_flight.arr_time) |arr_time_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_time_str } }) else null,
-            .scheduled_utc = if (api_flight.arr_time_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .scheduled_utc = try parseUtcInstant(api_flight.arr_time_ts, api_flight.arr_time_utc),
             .estimated_local = if (api_flight.arr_estimated) |arr_estimated_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_estimated_str } }) else null,
-            .estimated_utc = if (api_flight.arr_estimated_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .estimated_utc = try parseUtcInstant(api_flight.arr_estimated_ts, api_flight.arr_estimated_utc),
             .actual_local = if (api_flight.arr_actual) |arr_actual_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_actual_str } }) else null,
-            .actual_utc = if (api_flight.arr_actual_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .actual_utc = try parseUtcInstant(api_flight.arr_actual_ts, api_flight.arr_actual_utc),
         },
-        .percentage_completed = api_flight.percent,
-        .total_duration = total_duration,
-        .remaining_duration = remaining_duration,
+        .updated_at_utc = if (api_flight.updated) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+        .percentage_completed = normalized_progress.percentage_completed,
+        .total_duration = normalized_progress.total_duration,
+        .remaining_duration = normalized_progress.remaining_duration,
     };
+}
+
+const NormalizedProgress = struct {
+    percentage_completed: ?i64,
+    total_duration: ?zeit.Duration,
+    remaining_duration: ?zeit.Duration,
+};
+
+fn normalizeProgressData(
+    percent: ?i64,
+    total: ?zeit.Duration,
+    remaining: ?zeit.Duration,
+    estimated_arrival_utc: ?zeit.Instant,
+) NormalizedProgress {
+    var total_duration = total;
+    const provided_remaining = remaining;
+    const provided_percent = percent;
+
+    const percent_invalid = if (provided_percent) |p| !isProgressPercentValid(p) else false;
+    const remaining_exceeds_total = blk: {
+        const t = total_duration orelse break :blk false;
+        const r = provided_remaining orelse break :blk false;
+        break :blk r.minutes > t.minutes;
+    };
+
+    var normalized_remaining = provided_remaining;
+    if (percent_invalid or remaining_exceeds_total) {
+        normalized_remaining = remainingFromEstimatedArrival(estimated_arrival_utc);
+    }
+
+    if (total_duration) |total_value| {
+        if (normalized_remaining) |remaining_value| {
+            if (remaining_value.minutes > total_value.minutes) {
+                total_duration = remaining_value;
+            }
+        }
+    }
+
+    var normalized_percent: ?i64 = null;
+    if (!(percent_invalid or remaining_exceeds_total)) {
+        if (provided_percent) |p| {
+            if (isProgressPercentValid(p)) {
+                normalized_percent = p;
+            }
+        }
+    }
+
+    if (normalized_percent == null) {
+        normalized_percent = percentFromDurations(total_duration, normalized_remaining);
+    }
+
+    return .{
+        .percentage_completed = normalized_percent,
+        .total_duration = total_duration,
+        .remaining_duration = normalized_remaining,
+    };
+}
+
+fn isProgressPercentValid(percent: i64) bool {
+    return percent >= 0 and percent <= 100;
+}
+
+fn inferAirlineIata(flight_iata: []const u8) []const u8 {
+    var prefix_len: usize = 0;
+    while (prefix_len < flight_iata.len and std.ascii.isAlphabetic(flight_iata[prefix_len])) : (prefix_len += 1) {}
+    if (prefix_len == 0) return "--";
+    return flight_iata[0..prefix_len];
+}
+
+fn parseUtcInstant(ts: ?i64, iso_utc: ?[]const u8) !?zeit.Instant {
+    if (ts) |value| {
+        return try zeit.instant(.{ .source = .{ .unix_timestamp = value } });
+    }
+    if (iso_utc) |value| {
+        return try zeit.instant(.{ .source = .{ .iso8601 = value } });
+    }
+    return null;
+}
+
+fn selectArrivalForProgress(api_flight: ApiFlight) !?zeit.Instant {
+    if (api_flight.arr_estimated_ts) |ts| {
+        return try zeit.instant(.{ .source = .{ .unix_timestamp = ts } });
+    }
+    if (api_flight.arr_estimated_utc) |iso| {
+        return try zeit.instant(.{ .source = .{ .iso8601 = iso } });
+    }
+
+    if (api_flight.arr_time_ts) |ts| {
+        return try zeit.instant(.{ .source = .{ .unix_timestamp = ts } });
+    }
+    if (api_flight.arr_time_utc) |iso| {
+        return try zeit.instant(.{ .source = .{ .iso8601 = iso } });
+    }
+
+    return null;
+}
+
+fn remainingFromEstimatedArrival(estimated_arrival_utc: ?zeit.Instant) ?zeit.Duration {
+    const arrival = estimated_arrival_utc orelse return null;
+    const now = zeit.instant(.{ .source = .now, .timezone = &zeit.utc }) catch return null;
+
+    const delta_seconds = arrival.unixTimestamp() - now.unixTimestamp();
+    if (delta_seconds <= 0) {
+        return .{ .minutes = 0 };
+    }
+
+    const minutes_i64 = @divFloor(delta_seconds + 59, 60);
+    if (minutes_i64 < 0) {
+        return .{ .minutes = 0 };
+    }
+    if (minutes_i64 > std.math.maxInt(usize)) {
+        return null;
+    }
+
+    return .{ .minutes = @as(usize, @intCast(minutes_i64)) };
+}
+
+fn percentFromDurations(total: ?zeit.Duration, remaining: ?zeit.Duration) ?i64 {
+    const total_duration = total orelse return null;
+    const remaining_duration = remaining orelse return null;
+    if (total_duration.minutes == 0) return null;
+
+    const flown_minutes = if (remaining_duration.minutes >= total_duration.minutes)
+        0
+    else
+        total_duration.minutes - remaining_duration.minutes;
+
+    const flown_u128 = @as(u128, flown_minutes);
+    const total_u128 = @as(u128, total_duration.minutes);
+    const rounded = (flown_u128 * 100 + total_u128 / 2) / total_u128;
+    const clamped = @min(rounded, @as(u128, 100));
+
+    return @as(i64, @intCast(clamped));
 }
 
 fn minutesToDuration(value: ?f64) ?zeit.Duration {

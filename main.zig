@@ -446,6 +446,10 @@ const Model = struct {
             return;
         };
 
+        if (statusProviderLabel(ctx.allocator, status)) |label| {
+            try writer.print("{s}\n\n", .{try hint_style.render(ctx.allocator, label)});
+        }
+
         try writer.print("{s}\n", .{try section_style.render(ctx.allocator, "STATUS")});
         const flight_title = try std.fmt.allocPrint(ctx.allocator, "{s} {s} ({s})", .{ status.airline_name, status.flight_number, status.flight_iata });
         try writeLabeledValue(writer, ctx.allocator, label_style, value_style, "Flight", flight_title);
@@ -688,7 +692,7 @@ const Model = struct {
         }
 
         if (status.percentage_completed) |percent| {
-            if (percent != 0) {
+            if (percent > 0 and percent <= 100) {
                 try writer.print("\n{s}\n", .{try section_style.render(ctx.allocator, "PROGRESS")});
                 var progress = zz.Progress.init();
                 progress.setGradient(zz.Color.hex("#0ea5e9"), zz.Color.hex("#22c55e"));
@@ -903,6 +907,27 @@ fn formatDeltaFromScheduled(allocator: std.mem.Allocator, scheduled: ?zeit.Insta
 fn hasDelay(delay: ?zeit.Duration) bool {
     const value = delay orelse return false;
     return durationMinutes(value) > 0;
+}
+
+fn statusProviderLabel(allocator: std.mem.Allocator, status: status_client.FlightStatus) ?[]const u8 {
+    const updated = status.updated_at_utc orelse return "ETA source: AirLabs";
+    const now = zeit.instant(.{ .source = .now, .timezone = &zeit.utc }) catch return "ETA source: AirLabs";
+
+    var age_seconds = now.unixTimestamp() - updated.unixTimestamp();
+    if (age_seconds < 0) age_seconds = 0;
+
+    if (age_seconds < 60) {
+        return std.fmt.allocPrint(allocator, "ETA source: AirLabs (updated {d}s ago)", .{age_seconds}) catch "ETA source: AirLabs";
+    }
+
+    const age_minutes = @divFloor(age_seconds, 60);
+    if (age_minutes < 60) {
+        return std.fmt.allocPrint(allocator, "ETA source: AirLabs (updated {d}m ago)", .{age_minutes}) catch "ETA source: AirLabs";
+    }
+
+    const hours = @divFloor(age_minutes, 60);
+    const minutes = @mod(age_minutes, 60);
+    return std.fmt.allocPrint(allocator, "ETA source: AirLabs (updated {d}h {d}m ago)", .{ hours, minutes }) catch "ETA source: AirLabs";
 }
 
 fn styleForDepartedStatus(
