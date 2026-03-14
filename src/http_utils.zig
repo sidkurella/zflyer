@@ -1,4 +1,5 @@
 const std = @import("std");
+const encoding = @import("../deps/httpx/src/util/encoding.zig");
 
 pub fn queryParamsToURL(
     allocator: std.mem.Allocator,
@@ -18,7 +19,14 @@ pub fn queryParamsToURL(
                 try url.append(allocator, '&');
             }
             first = false;
-            try url.print(allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+
+            const encoded_key = try encoding.PercentEncoding.encode(allocator, entry.key_ptr.*);
+            defer allocator.free(encoded_key);
+
+            const encoded_value = try encoding.PercentEncoding.encode(allocator, entry.value_ptr.*);
+            defer allocator.free(encoded_value);
+
+            try url.print(allocator, "{s}={s}", .{ encoded_key, encoded_value });
         }
     }
     return url.toOwnedSlice(allocator);

@@ -3,15 +3,28 @@ const zz = @import("deps/zigzag/src/root.zig");
 const args = @import("deps/args/src/args.zig");
 const status_client = @import("src/status_client.zig");
 const location_client = @import("src/location_client.zig");
+const airline_client = @import("src/airline_search_client.zig");
 const Env = @import("deps/dotenv-zig/src/root.zig");
 const zeit = @import("deps/zeit/src/zeit.zig");
 
+const Screen = enum {
+    airline_query,
+    airline_results,
+    flight_number_query,
+    status,
+};
+
 const Model = struct {
     allocator: std.mem.Allocator,
-    flight_number: []const u8,
+    flight_number: ?[]const u8,
     status_client: *status_client.FlightStatusClient,
     location_client: *location_client.LocationClient,
+    airline_search_client: *airline_client.AirlineSearchClient,
     local_zone: *const zeit.TimeZone,
+
+    screen: Screen = .airline_query,
+    selected_airline_name: ?[]const u8 = null,
+    selected_airline_iata: ?[]const u8 = null,
 
     flight_status: ?status_client.FlightStatus = null,
     location_result: ?location_client.LocationResult = null,
@@ -21,6 +34,11 @@ const Model = struct {
     error_text: ?[]const u8 = null,
     spinner: zz.Spinner = zz.Spinner.init(),
 
+    airline_input: zz.TextInput = undefined,
+    flight_number_input: zz.TextInput = undefined,
+    airline_suggestions: ?airline_client.AirlineSearchResult = null,
+    airline_result_list: zz.List(airline_client.Airline) = undefined,
+
     pub const Msg = union(enum) {
         key: zz.KeyEvent,
         tick: zz.msg.Tick,
@@ -28,38 +46,70 @@ const Model = struct {
     };
 
     pub fn init(self: *Model, _: *zz.Context) zz.Cmd(Msg) {
-        self.loading = true;
-        self.pending_refresh = true;
+        self.loading = false;
+        self.pending_refresh = false;
         self.refresh_armed = false;
         self.error_text = null;
+
         self.spinner.setFrames(zz.Spinner.Styles.arc);
         self.spinner.setStyle((zz.Style{}).fg(zz.Color.hex("#f59e0b")).inline_style(true));
-        return zz.Cmd(Msg).everyMs(10);
+
+        self.airline_input = zz.TextInput.init(self.allocator);
+        self.airline_input.setPrompt("Airline: ");
+        self.airline_input.setPlaceholder("Enter airline name (e.g. American Airlines)...");
+
+        self.flight_number_input = zz.TextInput.init(self.allocator);
+        self.flight_number_input.setPrompt("Flight #: ");
+        self.flight_number_input.setPlaceholder("Type number (e.g. 123)...");
+
+        self.airline_result_list = zz.List(airline_client.Airline).init(self.allocator);
+        self.airline_result_list.multi_select = false;
+        self.airline_result_list.height = 8;
+        self.airline_result_list.show_item_count = true;
+
+        if (self.flight_number != null) {
+            self.screen = .status;
+            self.startRefresh();
+        } else {
+            self.screen = .airline_query;
+            self.airline_input.focus();
+            self.flight_number_input.blur();
+            self.airline_result_list.blur();
+        }
+
+        return zz.Cmd(Msg).everyMs(16);
     }
 
     pub fn deinit(self: *Model) void {
-        if (self.flight_status) |*status| {
-            status.deinit(self.allocator);
-            self.flight_status = null;
+        self.clearStatusData();
+
+        if (self.flight_number) |flight| {
+            self.allocator.free(flight);
+            self.flight_number = null;
         }
-        if (self.location_result) |*location| {
-            location.deinit();
-            self.location_result = null;
+
+        if (self.selected_airline_name) |name| {
+            self.allocator.free(name);
+            self.selected_airline_name = null;
         }
-        self.allocator.free(self.flight_number);
+        if (self.selected_airline_iata) |iata| {
+            self.allocator.free(iata);
+            self.selected_airline_iata = null;
+        }
+
+        if (self.airline_suggestions) |*results| {
+            results.deinit();
+            self.airline_suggestions = null;
+        }
+
+        self.airline_input.deinit();
+        self.flight_number_input.deinit();
+        self.airline_result_list.deinit();
     }
 
     pub fn update(self: *Model, msg: Msg, _: *zz.Context) zz.Cmd(Msg) {
         switch (msg) {
-            .key => |k| switch (k.key) {
-                .char => |c| {
-                    if (c == 'q') return .quit;
-                    if (c == 'r') return .{ .msg = .refresh };
-                },
-                .escape => return .quit,
-                .f5 => return .{ .msg = .refresh },
-                else => {},
-            },
+            .key => |k| return self.handleKey(k),
             .tick => |tick_msg| {
                 _ = self.spinner.update(tick_msg.timestamp);
                 if (self.pending_refresh) {
@@ -71,20 +121,211 @@ const Model = struct {
                 }
             },
             .refresh => {
-                self.loading = true;
-                self.pending_refresh = true;
-                self.refresh_armed = false;
-                self.error_text = null;
+                if (self.screen == .status and self.flight_number != null) {
+                    self.startRefresh();
+                }
             },
         }
 
         return .none;
     }
 
+    fn handleKey(self: *Model, key_event: zz.KeyEvent) zz.Cmd(Msg) {
+        switch (self.screen) {
+            .airline_query => {
+                switch (key_event.key) {
+                    .escape => return .quit,
+                    .enter => self.submitAirlineSearch(),
+                    else => self.airline_input.handleKey(key_event),
+                }
+            },
+            .airline_results => {
+                switch (key_event.key) {
+                    .escape => {
+                        self.screen = .airline_query;
+                        self.airline_result_list.blur();
+                        self.airline_input.focus();
+                    },
+                    .enter => {
+                        self.airline_result_list.handleKey(key_event);
+                        self.acceptSelectedAirline();
+                    },
+                    else => self.airline_result_list.handleKey(key_event),
+                }
+            },
+            .flight_number_query => {
+                switch (key_event.key) {
+                    .escape => {
+                        self.screen = .airline_results;
+                        self.flight_number_input.blur();
+                        self.airline_result_list.focus();
+                    },
+                    .enter => self.submitFlightNumber(),
+                    else => self.flight_number_input.handleKey(key_event),
+                }
+            },
+            .status => {
+                switch (key_event.key) {
+                    .escape => return .quit,
+                    .f5 => return .{ .msg = .refresh },
+                    .char => |c| {
+                        if (c == 'q') return .quit;
+                        if (c == 'r') return .{ .msg = .refresh };
+                    },
+                    else => {},
+                }
+            },
+        }
+
+        return .none;
+    }
+
+    fn submitAirlineSearch(self: *Model) void {
+        const raw = self.airline_input.getValue();
+        const query = std.mem.trim(u8, raw, " \t\r\n");
+
+        if (query.len == 0) {
+            self.error_text = "Please enter an airline name";
+            return;
+        }
+
+        var results = self.airline_search_client.searchAirlines(query) catch |err| {
+            self.error_text = @errorName(err);
+            return;
+        };
+
+        if (results.airlines.len == 0) {
+            results.deinit();
+            self.error_text = "No matching airlines found";
+            return;
+        }
+
+        self.airline_result_list.clear();
+        if (self.airline_suggestions) |*existing| {
+            existing.deinit();
+            self.airline_suggestions = null;
+        }
+
+        self.airline_suggestions = results;
+        if (self.airline_suggestions) |stored| {
+            for (stored.airlines) |airline| {
+                const item = zz.List(airline_client.Airline).Item.withDescription(airline, airline.name, airline.iata_code);
+                self.airline_result_list.addItem(item) catch {
+                    self.error_text = "Failed to load airline list";
+                    return;
+                };
+            }
+        }
+
+        self.airline_result_list.gotoFirst();
+        self.airline_input.blur();
+        self.airline_result_list.focus();
+        self.screen = .airline_results;
+        self.error_text = null;
+    }
+
+    fn acceptSelectedAirline(self: *Model) void {
+        const selected = self.airline_result_list.selectedValue() orelse {
+            self.error_text = "Select an airline before continuing";
+            return;
+        };
+
+        self.replaceSelectedAirline(selected) catch {
+            self.error_text = "Failed to store selected airline";
+            return;
+        };
+
+        self.flight_number_input.setValue("") catch {};
+        self.airline_result_list.blur();
+        self.flight_number_input.focus();
+        self.screen = .flight_number_query;
+        self.error_text = null;
+    }
+
+    fn replaceSelectedAirline(self: *Model, selected: airline_client.Airline) !void {
+        if (self.selected_airline_name) |name| {
+            self.allocator.free(name);
+            self.selected_airline_name = null;
+        }
+        if (self.selected_airline_iata) |iata| {
+            self.allocator.free(iata);
+            self.selected_airline_iata = null;
+        }
+
+        self.selected_airline_name = try self.allocator.dupe(u8, selected.name);
+        errdefer {
+            if (self.selected_airline_name) |name| {
+                self.allocator.free(name);
+                self.selected_airline_name = null;
+            }
+        }
+
+        self.selected_airline_iata = try self.allocator.dupe(u8, selected.iata_code);
+    }
+
+    fn submitFlightNumber(self: *Model) void {
+        const iata = self.selected_airline_iata orelse {
+            self.error_text = "Pick an airline first";
+            self.screen = .airline_query;
+            self.airline_input.focus();
+            self.flight_number_input.blur();
+            return;
+        };
+
+        const raw_flight = self.flight_number_input.getValue();
+        const flight_number_part = std.mem.trim(u8, raw_flight, " \t\r\n");
+        if (flight_number_part.len == 0) {
+            self.error_text = "Please enter a flight number";
+            return;
+        }
+
+        const full_flight_iata = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ iata, flight_number_part }) catch {
+            self.error_text = "Failed to build flight code";
+            return;
+        };
+
+        if (self.flight_number) |existing| {
+            self.allocator.free(existing);
+        }
+        self.flight_number = full_flight_iata;
+
+        self.clearStatusData();
+        self.screen = .status;
+        self.startRefresh();
+    }
+
+    fn startRefresh(self: *Model) void {
+        self.loading = true;
+        self.pending_refresh = true;
+        self.refresh_armed = false;
+        self.error_text = null;
+    }
+
+    fn clearStatusData(self: *Model) void {
+        if (self.flight_status) |*status| {
+            status.deinit(self.allocator);
+            self.flight_status = null;
+        }
+
+        if (self.location_result) |*location| {
+            location.deinit();
+            self.location_result = null;
+        }
+    }
+
     fn performRefresh(self: *Model) void {
-        const status = self.status_client.checkStatus(self.flight_number) catch |err| {
+        const flight = self.flight_number orelse {
             self.loading = false;
             self.pending_refresh = false;
+            self.refresh_armed = false;
+            self.error_text = "Missing flight number";
+            return;
+        };
+
+        const status = self.status_client.checkStatus(flight) catch |err| {
+            self.loading = false;
+            self.pending_refresh = false;
+            self.refresh_armed = false;
             self.error_text = @errorName(err);
             return;
         };
@@ -134,6 +375,59 @@ const Model = struct {
         const error_style = (zz.Style{}).fg(zz.Color.hex("#f87171")).bold(true);
 
         try writer.print("{s}\n", .{try title_style.render(ctx.allocator, "zflyer - flight tracker")});
+
+        switch (self.screen) {
+            .airline_query => {
+                try writer.print("{s}\n\n", .{try hint_style.render(ctx.allocator, "Enter airline name, then press Enter")});
+                try writer.print("{s}\n", .{try section_style.render(ctx.allocator, "SETUP")});
+                const input_text = try self.airline_input.view(ctx.allocator);
+                try writer.print("{s}\n", .{input_text});
+                try writer.print("{s}\n", .{try hint_style.render(ctx.allocator, "Esc to quit")});
+
+                if (self.error_text) |err| {
+                    const message = try std.fmt.allocPrint(ctx.allocator, "Error: {s}", .{err});
+                    try writer.print("\n{s}\n", .{try error_style.render(ctx.allocator, message)});
+                }
+                return;
+            },
+            .airline_results => {
+                try writer.print("{s}\n\n", .{try hint_style.render(ctx.allocator, "Pick airline with arrows + Enter")});
+                try writer.print("{s}\n", .{try section_style.render(ctx.allocator, "AIRLINE RESULTS")});
+
+                const list_text = try self.airline_result_list.view(ctx.allocator);
+                try writer.print("{s}\n", .{list_text});
+                try writer.print("{s}\n", .{try hint_style.render(ctx.allocator, "Esc to go back")});
+
+                if (self.error_text) |err| {
+                    const message = try std.fmt.allocPrint(ctx.allocator, "Error: {s}", .{err});
+                    try writer.print("\n{s}\n", .{try error_style.render(ctx.allocator, message)});
+                }
+                return;
+            },
+            .flight_number_query => {
+                try writer.print("{s}\n\n", .{try hint_style.render(ctx.allocator, "Enter flight number and press Enter")});
+                try writer.print("{s}\n", .{try section_style.render(ctx.allocator, "FLIGHT")});
+
+                if (self.selected_airline_name) |name| {
+                    try writeLabeledValue(writer, ctx.allocator, label_style, value_style, "Airline", name);
+                }
+                if (self.selected_airline_iata) |iata| {
+                    try writeLabeledValue(writer, ctx.allocator, label_style, value_style, "IATA Code", iata);
+                }
+
+                const input_text = try self.flight_number_input.view(ctx.allocator);
+                try writer.print("{s}\n", .{input_text});
+                try writer.print("{s}\n", .{try hint_style.render(ctx.allocator, "Esc to go back")});
+
+                if (self.error_text) |err| {
+                    const message = try std.fmt.allocPrint(ctx.allocator, "Error: {s}", .{err});
+                    try writer.print("\n{s}\n", .{try error_style.render(ctx.allocator, message)});
+                }
+                return;
+            },
+            .status => {},
+        }
+
         try writer.print("{s}\n\n", .{try hint_style.render(ctx.allocator, "Press q to quit, r/F5 to refresh")});
 
         if (self.loading) {
@@ -455,14 +749,15 @@ pub fn main() !void {
     var lc = location_client.LocationClient.init(allocator, try env.getRequired("GEOAPIFY_API_KEY"));
     defer lc.deinit();
 
-    const flight_number = result.getString("flight_number");
-    if (flight_number == null) {
-        std.debug.print("No flight number provided. Use --help for usage information.\n", .{});
-        return;
-    }
+    var ac = airline_client.AirlineSearchClient.init(allocator, try env.getRequired("AIRLABS_API_KEY"));
+    defer ac.deinit();
 
-    const owned_flight_number = try allocator.dupe(u8, flight_number.?);
-    errdefer allocator.free(owned_flight_number);
+    const flight_number_arg = result.getString("flight_number");
+    var owned_flight_number: ?[]const u8 = null;
+    if (flight_number_arg) |flight| {
+        owned_flight_number = try allocator.dupe(u8, flight);
+        errdefer if (owned_flight_number) |owned| allocator.free(owned);
+    }
 
     var env_map = try std.process.getEnvMap(allocator);
     defer env_map.deinit();
@@ -473,6 +768,9 @@ pub fn main() !void {
     var program = try zz.Program(Model).initWithOptions(allocator, .{
         .title = "zflyer",
         .alt_screen = true,
+        .bracketed_paste = false,
+        .kitty_keyboard = false,
+        .mouse = false,
     });
     defer program.deinit();
 
@@ -481,6 +779,7 @@ pub fn main() !void {
         .flight_number = owned_flight_number,
         .status_client = &sc,
         .location_client = &lc,
+        .airline_search_client = &ac,
         .local_zone = &local_zone,
     };
 
