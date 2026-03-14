@@ -106,6 +106,9 @@ pub const TimeInfo = struct {
     scheduled_local: ?zeit.Instant,
     scheduled_utc: ?zeit.Instant,
 
+    estimated_local: ?zeit.Instant,
+    estimated_utc: ?zeit.Instant,
+
     actual_local: ?zeit.Instant,
     actual_utc: ?zeit.Instant,
 };
@@ -246,11 +249,15 @@ const ApiFlight = struct {
 
     dep_time: ?[]const u8 = null, // Scheduled departure time, airport local time
     dep_time_ts: ?i64 = null, // Scheduled departure time, UNIX timestamp
+    dep_estimated: ?[]const u8 = null, // Updated departure time, airport local time
+    dep_estimated_ts: ?i64 = null, // Updated departure UNIX timestamp
     dep_actual: ?[]const u8 = null, // Actual departure time, airport local time
     dep_actual_ts: ?i64 = null, // Actual departure time, UNIX timestamp
 
     arr_time: ?[]const u8 = null, // Scheduled arrival time, airport local time
     arr_time_ts: ?i64 = null, // Scheduled arrival time, UNIX timestamp
+    arr_estimated: ?[]const u8 = null, // Updated arrival time, airport local time
+    arr_estimated_ts: ?i64 = null, // Updated arrival UNIX timestamp
     arr_actual: ?[]const u8 = null, // Actual arrival time, airport local time
     arr_actual_ts: ?i64 = null, // Actual arrival time, UNIX timestamp
 
@@ -370,12 +377,16 @@ fn toFlightStatus(allocator: std.mem.Allocator, api_flight: ApiFlight, fallback_
         .departure_time = .{
             .scheduled_local = if (api_flight.dep_time) |dep_time_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_time_str } }) else null,
             .scheduled_utc = if (api_flight.dep_time_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .estimated_local = if (api_flight.dep_estimated) |dep_estimated_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_estimated_str } }) else null,
+            .estimated_utc = if (api_flight.dep_estimated_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
             .actual_local = if (api_flight.dep_actual) |dep_actual_str| try zeit.instant(.{ .source = .{ .iso8601 = dep_actual_str } }) else null,
             .actual_utc = if (api_flight.dep_actual_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
         },
         .arrival_time = .{
             .scheduled_local = if (api_flight.arr_time) |arr_time_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_time_str } }) else null,
             .scheduled_utc = if (api_flight.arr_time_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
+            .estimated_local = if (api_flight.arr_estimated) |arr_estimated_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_estimated_str } }) else null,
+            .estimated_utc = if (api_flight.arr_estimated_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
             .actual_local = if (api_flight.arr_actual) |arr_actual_str| try zeit.instant(.{ .source = .{ .iso8601 = arr_actual_str } }) else null,
             .actual_utc = if (api_flight.arr_actual_ts) |ts| try zeit.instant(.{ .source = .{ .unix_timestamp = ts } }) else null,
         },
